@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
 """
-Test script for the HM recommender system.
+Test script for the modular H&M recommender system.
 """
 
 import sys
-import os
-from dotenv import load_dotenv
-from supabase import create_client
-from hm_algorithm import HMRecommender
+from recommender import HMRecommender, init_supabase
 
 def test_recommender():
     """
-    Test the HM recommender system with proper error handling.
+    Test the H&M recommender system with proper error handling.
     """
-    # Load environment variables
-    load_dotenv()
-    
-    # Initialize Supabase client
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    
-    if not supabase_url or not supabase_key:
-        print("Error: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables must be set.")
-        return
-        
-    supabase = create_client(supabase_url, supabase_key)
-    
-    # Initialize recommender
-    recommender = HMRecommender(supabase)
-    
     try:
+        # Initialize Supabase client
+        supabase = init_supabase()
+        
         print("Checking database tables...")
         # Check if the interactions table exists and has the right structure
         interactions_response = supabase.table('hm_interactions').select('*').execute()
@@ -54,8 +38,11 @@ def test_recommender():
             
         print(f"Items table exists with {len(items_response.data)} items")
         
+        # Initialize recommender
+        recommender = HMRecommender(supabase)
+        
         print("\nTraining model...")
-        # Train model with modified approach to handle empty interactions
+        # Train model
         recommender.train_model(
             num_components=30,
             learning_rate=0.05,
@@ -71,6 +58,12 @@ def test_recommender():
             
             # Print recommendations
             print(f"\nTop 10 recommendations for user {user_id}:")
+            
+            # Debug: Print raw recommendations
+            print(f"Debug - Number of recommendations: {len(recommendations)}")
+            if recommendations:
+                print(f"Debug - First recommendation: {recommendations[0]}")
+            
             for i, rec in enumerate(recommendations, 1):
                 item_details = rec.get('item_details', {})
                 print(f"{i}. {item_details.get('name', 'Unknown')} - {item_details.get('brand', 'Unknown')}")
@@ -85,7 +78,7 @@ def test_recommender():
                 print(f"   Score: {rec['score']:.4f}")
                 print()
         else:
-            print("\nNo user ID provided. Please run with a user ID: python test_recommender.py <user_id>")
+            print("\nNo user ID provided. Please run with a user ID: python test_recommender_modular.py <user_id>")
             
     except Exception as e:
         print(f"\nError testing recommender: {e}")
@@ -94,4 +87,4 @@ def test_recommender():
         sys.exit(1)
 
 if __name__ == "__main__":
-    test_recommender()
+    test_recommender() 

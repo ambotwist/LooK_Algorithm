@@ -49,19 +49,11 @@ Replace `<user_id>` with the ID of the user you want to generate recommendations
 ### Using the Recommender in Your Code
 
 ```python
-from dotenv import load_dotenv
-from supabase import create_client
-from hm_algorithm import HMRecommender
-import os
-
-# Load environment variables
-load_dotenv()
+# Import the recommender
+from recommender import HMRecommender, init_supabase
 
 # Initialize Supabase client
-supabase = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-)
+supabase = init_supabase()
 
 # Initialize recommender
 recommender = HMRecommender(supabase)
@@ -70,13 +62,14 @@ recommender = HMRecommender(supabase)
 recommender.train_model()
 
 # Generate recommendations for a user
-user_id = "your_user_id"
+user_id = "e4d98795-62a8-4438-9136-5117ca6e6aee"
 recommendations = recommender.recommend_for_user(user_id, n=10)
 
 # Print recommendations
 for i, rec in enumerate(recommendations, 1):
     item_details = rec.get('item_details', {})
-    print(f"{i}. {item_details.get('name')} - Score: {rec['score']}")
+    print(f"{i}. {item_details.get('name', 'Unknown')} - {item_details.get('brand', 'Unknown')}")
+    print(f"   Score: {rec['score']:.4f}")
 ```
 
 ## Model Parameters
