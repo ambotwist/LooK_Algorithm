@@ -4,7 +4,7 @@ Test script for the modular H&M recommender system.
 """
 
 import sys
-from recommender import HMRecommender, init_supabase
+from hm_recommender import HMRecommender, init_supabase
 from typing import List, Dict, Any
 
 def test_recommender():

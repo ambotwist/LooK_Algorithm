@@ -5,7 +5,7 @@ Main script to run the H&M recommender system.
 
 import sys
 import argparse
-from recommender import HMRecommender, init_supabase
+from hm_recommender import HMRecommender, init_supabase
 
 def parse_args():
     """Parse command line arguments."""
