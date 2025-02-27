@@ -81,17 +81,23 @@ def map_hm_category(category_name, product_name):
     """Map H&M categories to our database categories"""
     name_lower = product_name.lower()
     
-    # First try to map based on product name
-    if any(word in name_lower for word in ["jean", "pant", "short", "legging", "skirt"]):
+    # First try to map based on product name - order matters here!
+    # Check for bottoms first (pants, shorts, etc.)
+    if any(word in name_lower for word in ["pant", "chino", "jean", "jogger", "cargo", "short", "swim short", "skirt", "legging"]):
         return "bottoms"
+    # Then check for shoes
     elif any(word in name_lower for word in ["shoe", "sneaker", "boot", "sandal", "loafer"]):
         return "shoes"
-    elif any(word in name_lower for word in ["jacket", "coat"]):
+    # Then check for outerwear
+    elif any(word in name_lower for word in ["jacket", "coat", "bomber"]):
         return "outerwear"
+    # Then check for formal wear
     elif any(word in name_lower for word in ["suit", "tuxedo", "blazer"]):
         return "formal_wear"
-    elif any(word in name_lower for word in ["t-shirt", "shirt", "sweater", "hoodie", "top"]):
+    # Finally check for tops
+    elif any(word in name_lower for word in ["t-shirt", "shirt", "sweater", "hoodie", "top", "polo", "tank", "sweatshirt"]):
         return "tops"
+    # Skip accessories (already handled elsewhere)
     
     # Fallback to category mapping
     category_mapping = {
@@ -104,7 +110,13 @@ def map_hm_category(category_name, product_name):
         "Jackets & Coats": "outerwear",
         "Blazers & Suits": "formal_wear",
         "Shoes": "shoes",
-        "Sportswear": "sportswear"
+        "Sportswear": "sportswear",
+        "Accessories": "accessories",  # Add this mapping
+        "Socks": "accessories",        # Add this mapping
+        "Bags": "accessories",         # Add this mapping
+        "Belts": "accessories",        # Add this mapping
+        "Hats": "accessories",         # Add this mapping
+        "Jewelry": "accessories"       # Add this mapping
     }
     return category_mapping.get(category_name, "tops")
 
@@ -153,14 +165,19 @@ def map_hm_specific_category(high_category, product_name):
             "sweater": "sweaters",
             "hoodie": "hoodies",
             "blouse": "blouses",
-            "polo": "polo_shirts"
+            "polo": "polo_shirts",
+            "sweatshirt": "hoodies"
         },
         "bottoms": {
             "jean": "jeans",
             "short": "shorts",
+            "swim short": "shorts",
             "skirt": "skirts",
             "legging": "leggings",
-            "pant": "pants"
+            "pant": "pants",
+            "chino": "pants",
+            "jogger": "pants",
+            "cargo": "pants"
         },
         "shoes": {
             "sneaker": "sneakers",
@@ -174,12 +191,34 @@ def map_hm_specific_category(high_category, product_name):
             "jacket": "jackets",
             "coat": "coats",
             "blazer": "blazers",
-            "vest": "vests"
+            "vest": "vests",
+            "bomber": "jackets"
         },
         "formal_wear": {
             "suit": "suits",
             "tuxedo": "tuxedos",
             "dress": "dresses"
+        },
+        "accessories": {
+            "belt": "belts",
+            "sock": "socks",
+            "bag": "bags",
+            "hat": "hats",
+            "cap": "hats",
+            "scarf": "scarves",
+            "glove": "gloves",
+            "wallet": "wallets",
+            "watch": "watches",
+            "sunglasses": "eyewear",
+            "jewelry": "jewelry",
+            "necklace": "jewelry",
+            "bracelet": "jewelry",
+            "earring": "jewelry",
+            "ring": "jewelry",
+            "tie": "ties",
+            "backpack": "bags",
+            "crossbody": "bags",
+            "tote": "bags"
         }
     }
     
@@ -199,7 +238,7 @@ def map_hm_specific_category(high_category, product_name):
         "outerwear": "jackets",
         "formal_wear": "suits",
         "sportswear": "gym_tops",
-        "accessories": "watches"
+        "accessories": "other_accessories"  # Changed from "watches" to more generic
     }
     
     return defaults.get(high_category, "t-shirts")
@@ -442,14 +481,118 @@ def generate_test_items(num_items=20):
                 
             product_details = details["product"]
             
+            # Map categories
+            high_category = map_hm_category(product_details.get("mainCategory", {}).get("name", ""), product_name)
+            
+            # Skip accessories
+            if high_category == "accessories":
+                print(f"Skipping accessory item: {product_name}")
+                existing_items['codes'].add(product_code)  # Add to existing codes to prevent future API calls
+                continue
+                
             # Get images
             images = []
+            color_image_mapping = {}
+
+            # First check for direct galleryDetails in the product
+            if "galleryDetails" in product_details:
+                main_color = product_details.get("color", {}).get("text", "")
+                main_color_mapped = map_hm_color(main_color)
+                main_rgb = product_details.get("color", {}).get("rgbColor", "")
+                
+                for gallery_item in product_details["galleryDetails"]:
+                    if "baseUrl" in gallery_item:
+                        image_url = gallery_item["baseUrl"]
+                        images.append(image_url)
+                        color_image_mapping[image_url] = {
+                            "color_name": main_color,
+                            "color_mapped": main_color_mapped,
+                            "rgb_color": main_rgb
+                        }
+
+            # Then check articlesList for color variants
             if "articlesList" in product_details:
-                gallery_details = product_details["articlesList"][0].get("galleryDetails", [])
-                if gallery_details:
-                    images = [gallery_details[0].get("baseUrl", "https://via.placeholder.com/300")]
+                for article in product_details["articlesList"]:
+                    variant_color = article.get("color", {}).get("text", "")
+                    variant_color_mapped = map_hm_color(variant_color)
+                    variant_rgb = article.get("color", {}).get("rgbColor", "")
+                    
+                    gallery_details = article.get("galleryDetails", [])
+                    for gallery_item in gallery_details:
+                        if "baseUrl" in gallery_item:
+                            image_url = gallery_item["baseUrl"]
+                            if image_url not in images:  # Avoid duplicates
+                                images.append(image_url)
+                                color_image_mapping[image_url] = {
+                                    "color_name": variant_color,
+                                    "color_mapped": variant_color_mapped,
+                                    "rgb_color": variant_rgb
+                                }
+
+            # Default image if none found
             if not images:
-                images = ["https://via.placeholder.com/300"]
+                # Create placeholder images with different angles/views
+                placeholder_urls = [
+                    "https://via.placeholder.com/300?text=Front",
+                    "https://via.placeholder.com/300?text=Back",
+                    "https://via.placeholder.com/300?text=Side"
+                ]
+                images = placeholder_urls
+                for url in placeholder_urls:
+                    color_image_mapping[url] = {
+                        "color_name": "Default",
+                        "color_mapped": "black",
+                        "rgb_color": "#000000"
+                    }
+            # If we have fewer than 3 images, duplicate some to reach minimum
+            elif len(images) < 3:
+                original_images = images.copy()
+                while len(images) < 3:
+                    for img in original_images:
+                        if len(images) < 3:
+                            # Add a slight modification to URL to avoid exact duplicates
+                            new_img = f"{img}{'&v=' + str(len(images)) if '?' in img else '?v=' + str(len(images))}"
+                            images.append(new_img)
+                            color_image_mapping[new_img] = color_image_mapping[img]
+                        else:
+                            break
+            # If we have more than 9 images, keep only the first 9
+            elif len(images) > 9:
+                # Prioritize different image types if possible
+                image_types = {}
+                for img in images:
+                    for img_type in ["LOOKBOOK", "DESCRIPTIVESTILLLIFE", "DESCRIPTIVEDETAIL"]:
+                        if img_type.lower() in img.lower():
+                            if img_type not in image_types:
+                                image_types[img_type] = []
+                            image_types[img_type].append(img)
+                
+                # Create a balanced selection of images
+                selected_images = []
+                # First add one of each type if available
+                for img_type in ["LOOKBOOK", "DESCRIPTIVESTILLLIFE", "DESCRIPTIVEDETAIL"]:
+                    if img_type in image_types and image_types[img_type]:
+                        selected_images.append(image_types[img_type][0])
+                        image_types[img_type] = image_types[img_type][1:]
+                
+                # Then fill remaining slots with a balance of available types
+                remaining_slots = 9 - len(selected_images)
+                if remaining_slots > 0:
+                    all_remaining = []
+                    for img_list in image_types.values():
+                        all_remaining.extend(img_list)
+                    all_remaining.extend([img for img in images if img not in selected_images])
+                    selected_images.extend(all_remaining[:remaining_slots])
+                
+                # Update images list and remove unused mappings
+                unused_images = [img for img in images if img not in selected_images]
+                for img in unused_images:
+                    if img in color_image_mapping:
+                        del color_image_mapping[img]
+                
+                images = selected_images[:9]
+
+            print(f"Using {len(images)} images for product {product_name}")
                 
             # Check for duplicates and update existing_items if found
             if is_duplicate_item(product_details, existing_items, images):
@@ -474,8 +617,6 @@ def generate_test_items(num_items=20):
             current_batch_images.update(images)
             current_batch_name_price.add(name_price)
             
-            # Map categories
-            high_category = map_hm_category(product_details.get("mainCategory", {}).get("name", ""), product_name)
             specific_category = map_hm_specific_category(high_category, product_name)
             print(f"Mapped categories: {product_name} -> {high_category} -> {specific_category}")
             
@@ -486,6 +627,54 @@ def generate_test_items(num_items=20):
                 colors = [color]
             if not colors:
                 colors = ["black"]  # Default color
+                
+            # Get the primary color name for filtering images
+            primary_color_name = product_details.get("color", {}).get("text", "").lower()
+            
+            # Filter images to prioritize those matching the primary color
+            primary_color_images = []
+            other_images = []
+            
+            for img_url in images:
+                if img_url in color_image_mapping:
+                    img_color_name = color_image_mapping[img_url]["color_name"].lower()
+                    if img_color_name == primary_color_name:
+                        primary_color_images.append(img_url)
+                    else:
+                        other_images.append(img_url)
+            
+            # Use primary color images if we have enough, otherwise supplement with others
+            if len(primary_color_images) >= 3:
+                # If we have enough primary color images, use only those (up to 9)
+                filtered_images = primary_color_images[:9]
+            else:
+                # If we don't have enough primary color images, use what we have and add others
+                # to reach the minimum of 3 (but still cap at 9 total)
+                filtered_images = primary_color_images.copy()
+                remaining_slots = min(9 - len(filtered_images), len(other_images))
+                filtered_images.extend(other_images[:remaining_slots])
+                
+                # If we still don't have 3 images, duplicate some to reach the minimum
+                if len(filtered_images) < 3:
+                    original_images = filtered_images.copy()
+                    while len(filtered_images) < 3:
+                        for img in original_images:
+                            if len(filtered_images) < 3:
+                                # Add a slight modification to URL to avoid exact duplicates
+                                new_img = f"{img}{'&v=' + str(len(filtered_images)) if '?' in img else '?v=' + str(len(filtered_images))}"
+                                filtered_images.append(new_img)
+                                color_image_mapping[new_img] = color_image_mapping[img]
+                            else:
+                                break
+            
+            # Update the images list with our filtered selection
+            images = filtered_images
+            
+            # Update color_image_mapping to remove any unused images
+            unused_images = [img for img in color_image_mapping.keys() if img not in images]
+            for img in unused_images:
+                if img in color_image_mapping:
+                    del color_image_mapping[img]
                 
             # Determine sizes based on high_category
             top_size = shoe_size = bottom_size = None
@@ -560,6 +749,20 @@ def generate_test_items(num_items=20):
             print(f"Color: {colors[0]} (RGB: {rgb_color})")
             print(f"Fit: {item['fit']}")
             print(f"Style: {style}")
+            print(f"Images: {len(images)} total")
+            
+            # Count images by color
+            color_counts = {}
+            for img_url in images:
+                if img_url in color_image_mapping:
+                    color_name = color_image_mapping[img_url]["color_name"]
+                    if color_name not in color_counts:
+                        color_counts[color_name] = 0
+                    color_counts[color_name] += 1
+            
+            for color_name, count in color_counts.items():
+                print(f"  - {color_name}: {count} images")
+                
             if measurements:
                 print(f"Measurements: {', '.join(measurements)}")
             items.append(item)

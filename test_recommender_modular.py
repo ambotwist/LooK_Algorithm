@@ -5,6 +5,7 @@ Test script for the modular H&M recommender system.
 
 import sys
 from recommender import HMRecommender, init_supabase
+from typing import List, Dict, Any
 
 def test_recommender():
     """
@@ -47,7 +48,7 @@ def test_recommender():
             num_components=30,
             learning_rate=0.05,
             epochs=20,
-            loss='warp'
+            loss='warp-kos'
         )
         
         # Get user ID from command line or use default

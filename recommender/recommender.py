@@ -7,6 +7,7 @@ import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from supabase import Client
 import scipy.sparse as sparse
+import re
 
 from recommender.utils.logger import setup_logger
 from recommender.data.fetcher import fetch_items, fetch_interactions, fetch_item_details, fetch_disliked_items
@@ -88,171 +89,253 @@ class HMRecommender:
             loss=loss
         )
         
-    def recommend_for_user(self, user_id: str, n: int = 10, exclude_seen: bool = True) -> List[Dict[str, Any]]:
+    def _determine_true_category(self, item_details):
+        """
+        Determine the true category of an item based on its name and other details.
+        This helps correct miscategorized items in the database.
+        
+        Args:
+            item_details: Dictionary containing item details
+            
+        Returns:
+            String representing the true high-level category
+        """
+        if not item_details:
+            return None
+        
+        name = item_details.get('name', '').lower()
+        current_high_category = item_details.get('high_category')
+        
+        # Check for pants/bottoms keywords
+        if any(keyword in name for keyword in ['pant', 'chino', 'jean', 'jogger', 'cargo', 'short', 'swim short']):
+            return 'bottoms'
+        
+        # Check for tops keywords
+        if any(keyword in name for keyword in ['t-shirt', 'shirt', 'polo', 'tank', 'hoodie', 'sweatshirt', 'sweater']):
+            return 'tops'
+        
+        # Check for outerwear keywords
+        if any(keyword in name for keyword in ['jacket', 'coat', 'puffer', 'bomber']):
+            return 'outerwear'
+        
+        # Check for shoes keywords
+        if any(keyword in name for keyword in ['shoe', 'sneaker', 'loafer', 'boot', 'sandal']):
+            return 'shoes'
+        
+        # If we couldn't determine a better category, return the current one
+        return current_high_category
+
+    def _get_user_category_preferences(self, user_id):
+        """
+        Analyze user interactions to determine category preferences.
+        
+        Args:
+            user_id: User ID to analyze
+            
+        Returns:
+            Dictionary mapping categories to preference scores
+        """
+        try:
+            # Get user interactions
+            response = self.supabase.table('hm_interactions').select('item_id, interaction_type').eq('user_id', user_id).execute()
+            
+            if not response.data:
+                return {}
+            
+            # Get details of items the user has interacted with
+            item_ids = [item['item_id'] for item in response.data]
+            items_response = self.supabase.table('hm_items').select('id, name, high_category').in_('id', item_ids).execute()
+            
+            # Create a mapping of item_id to high_category
+            item_categories = {item['id']: self._determine_true_category(item) or item['high_category'] for item in items_response.data}
+            
+            # Create a mapping of item_id to interaction_type
+            item_interactions = {item['item_id']: item['interaction_type'] for item in response.data}
+            
+            # Calculate category preferences
+            category_preferences = {}
+            for item_id, interaction_type in item_interactions.items():
+                if item_id not in item_categories:
+                    continue
+                
+                category = item_categories[item_id]
+                
+                # Assign scores based on interaction type
+                if interaction_type == 'like':
+                    score = 1
+                elif interaction_type == 'superlike':
+                    score = 3  # Increased from 2 to 3
+                elif interaction_type == 'dislike':
+                    score = -1
+                else:
+                    score = 0
+                
+                category_preferences[category] = category_preferences.get(category, 0) + score
+            
+            return category_preferences
+        except Exception as e:
+            self.logger.error(f"Error getting user category preferences: {e}")
+            return {}
+
+    def recommend_for_user(self, user_id: str, n: int = 10) -> List[Dict[str, Any]]:
         """
         Generate recommendations for a specific user.
         
         Args:
-            user_id: ID of the user to generate recommendations for
+            user_id: User ID to generate recommendations for
             n: Number of recommendations to generate
-            exclude_seen: Whether to exclude items the user has already interacted with
             
         Returns:
-            List of recommended items with scores
+            List of recommended items
         """
-        # Check if user exists in the model
-        if user_id not in self.user_id_map:
-            logger.warning(f"User {user_id} not found in training data. Using cold start strategy.")
+        logger = self.logger
+        logger.info(f"Generating recommendations for user {user_id}")
+        
+        # Get user category preferences
+        category_preferences = self._get_user_category_preferences(user_id)
+        logger.info(f"User category preferences: {category_preferences}")
+        
+        # Get items the user has already interacted with
+        seen_items = {}
+        try:
+            response = self.supabase.table('hm_interactions').select('item_id, interaction_type').eq('user_id', user_id).execute()
+            
+            for item in response.data:
+                item_id = item['item_id']
+                interaction_type = item['interaction_type']
+                seen_items[item_id] = interaction_type
+            
+            logger.info(f"User has interacted with {len(seen_items)} items")
+            
+            # Get items the user has liked
+            liked_items = [item_id for item_id, interaction_type in seen_items.items()
+                          if interaction_type in ['like', 'superlike']]
+            
+            # Get items the user has disliked
+            disliked_items = [item_id for item_id, interaction_type in seen_items.items()
+                             if interaction_type == 'dislike']
+            
+            logger.info(f"User has liked {len(liked_items)} items and disliked {len(disliked_items)} items")
+        except Exception as e:
+            logger.error(f"Error fetching user interactions: {e}")
+            liked_items = []
+            disliked_items = []
+        
+        # If the user has no interactions, use cold start recommendations
+        if not seen_items:
+            logger.info("User has no interactions, using cold start recommendations")
             return self._cold_start_recommendations(n)
         
-        # Get internal user ID
-        user_idx = self.user_id_map[user_id]
-        logger.info(f"Found user {user_id} with internal index {user_idx}")
-
-        # Get all item scores
-        scores = self.model.predict(
-            user_ids=user_idx,
-            item_ids=np.arange(len(self.item_id_map)),
-            item_features=self.item_features
-        )
-        logger.info(f"Generated scores for {len(scores)} items")
-        logger.info(f"Score range: min={np.min(scores)}, max={np.max(scores)}")
-
-        # Handle user interactions
+        # Get disliked item details to extract keywords for filtering
+        disliked_keywords = set()
         try:
-            # Get disliked items
-            disliked_items = fetch_disliked_items(self.supabase, user_id)
-            logger.info(f"Found {len(disliked_items)} disliked items for user {user_id}")
-            
-            # Convert external IDs to internal indices
-            disliked_indices = [self.item_id_map[item_id] for item_id in disliked_items if item_id in self.item_id_map]
-            logger.info(f"Converted {len(disliked_indices)} disliked items to internal indices")
-            
-            # Set scores of disliked items to very negative values
-            for idx in disliked_indices:
-                scores[idx] = -np.inf
-                
-            # If exclude_seen is True, also exclude liked items
-            if exclude_seen:
-                # Fetch all interactions
-                response = self.supabase.table('hm_interactions').select('item_id, interaction_type').eq('user_id', user_id).execute()
-                logger.info(f"Found {len(response.data)} interactions for user {user_id}")
-                
-                # Create dictionaries for different interaction types
-                seen_items = {}
-                for item in response.data:
-                    item_id = item['item_id']
-                    interaction_type = item['interaction_type']
-                    seen_items[item_id] = interaction_type
-                
-                # Get liked items
-                liked_items = [item_id for item_id, interaction_type in seen_items.items() 
-                              if interaction_type in ['like', 'superlike']]
-                liked_indices = [self.item_id_map[item_id] for item_id in liked_items if item_id in self.item_id_map]
-                logger.info(f"Found {len(liked_items)} liked items, converted {len(liked_indices)} to internal indices")
-                
-                # Set scores of liked items to very negative values
-                for idx in liked_indices:
-                    scores[idx] = -np.inf
-                    
-            # Extract keywords from disliked items
             if disliked_items:
-                disliked_keywords, disliked_categories = extract_disliked_keywords(self.supabase, disliked_items)
-                logger.info(f"Extracted {len(disliked_keywords)} keywords and {len(disliked_categories)} categories from disliked items")
+                disliked_response = self.supabase.table('hm_items').select('name, description').in_('id', disliked_items).execute()
                 
-                # Get all items to check for similar items
-                all_items = self.supabase.table('hm_items').select(
-                    'id, name, high_category, specific_category'
-                ).execute()
+                for item in disliked_response.data:
+                    name = item.get('name', '').lower()
+                    description = item.get('description', '').lower()
+                    
+                    # Extract keywords from name and description
+                    words = set(re.findall(r'\b\w{3,}\b', name + ' ' + description))
+                    disliked_keywords.update(words)
                 
-                # Find items similar to disliked items
-                for item in all_items.data:
-                    item_id = item['id']
-                    if item_id in self.item_id_map and item_id not in disliked_items:
-                        # Check if item has similar keywords
-                        name_lower = item['name'].lower()
-                        
-                        # Check for keyword matches
-                        keyword_match = False
-                        for keyword in disliked_keywords:
-                            if keyword in name_lower and len(keyword) > 3:  # Only consider significant keywords
-                                keyword_match = True
-                                break
-                        
-                        # Check for category matches
-                        category_key = (item['high_category'], item['specific_category'])
-                        category_match = category_key in disliked_categories
-                        
-                        # If there's a strong match, reduce the score
-                        if keyword_match:
-                            idx = self.item_id_map[item_id]
-                            # Penalize but don't completely exclude
-                            scores[idx] -= 1.0
-                            
+                # Remove common words that aren't useful for filtering
+                common_words = {'with', 'and', 'the', 'for', 'this', 'that', 'from', 'have', 'has', 'had', 'not', 'are', 'were', 'was', 'been'}
+                disliked_keywords = disliked_keywords - common_words
+                
+                logger.info(f"Extracted {len(disliked_keywords)} keywords from disliked items")
         except Exception as e:
-            logger.error(f"Error processing user interactions: {e}")
-
-        # Get top N item indices
-        top_item_indices = np.argsort(-scores)[:n*2]  # Get more items than needed in case we filter some out
-        logger.info(f"Selected {len(top_item_indices)} top item indices")
-
-        # Convert back to external IDs and create result
-        recommendations = []
+            logger.error(f"Error extracting disliked keywords: {e}")
         
-        # Create reverse mapping from internal indices to external IDs
-        reverse_item_map = {v: k for k, v in self.item_id_map.items()}
-        logger.info(f"Created reverse mapping with {len(reverse_item_map)} items")
-
-        valid_count = 0
-        for idx in top_item_indices:
-            if idx in reverse_item_map:
-                item_id = reverse_item_map[idx]
-                if scores[idx] > -np.inf:  # Only include items with valid scores
-                    recommendations.append({
+        # Generate recommendations using the trained model
+        try:
+            # Get all items
+            items_response = self.supabase.table('hm_items').select('id').eq('is_active', True).execute()
+            all_item_ids = [item['id'] for item in items_response.data]
+            
+            # Filter out items the user has already interacted with
+            candidate_items = [item_id for item_id in all_item_ids if item_id not in seen_items]
+            
+            logger.info(f"Found {len(candidate_items)} candidate items for recommendations")
+            
+            # If we have no candidates, return cold start recommendations
+            if not candidate_items:
+                logger.warning("No candidate items found, using cold start recommendations")
+                return self._cold_start_recommendations(n)
+            
+            # Get scores for all candidate items
+            scores = []
+            for item_id in candidate_items:
+                try:
+                    # Get model score
+                    score = self.model.predict(user_id, item_id)
+                    
+                    # Get item details for filtering and boosting
+                    item_response = self.supabase.table('hm_items').select('*').eq('id', item_id).execute()
+                    if not item_response.data:
+                        continue
+                    
+                    item_details = item_response.data[0]
+                    
+                    # Determine true category
+                    true_category = self._determine_true_category(item_details) or item_details.get('high_category')
+                    
+                    # Apply category preference boost
+                    category_score = category_preferences.get(true_category, 0)
+                    category_boost = 0
+                    
+                    if category_score > 0:
+                        # Boost items from categories the user likes
+                        category_boost = min(0.5, category_score * 0.1)
+                    elif category_score < 0:
+                        # Penalize items from categories the user dislikes
+                        category_boost = max(-0.5, category_score * 0.1)
+                    
+                    # Apply the boost
+                    score += category_boost
+                    
+                    scores.append({
                         'item_id': item_id,
-                        'score': float(scores[idx])
+                        'score': score,
+                        'item_details': item_details,
+                        'category_boost': category_boost
                     })
-                    valid_count += 1
-                else:
-                    logger.debug(f"Skipping item {item_id} with score -inf")
-            else:
-                logger.warning(f"Item index {idx} not found in reverse mapping")
+                except Exception as e:
+                    logger.error(f"Error getting score for item {item_id}: {e}")
+            
+            # Sort by score (highest first)
+            scores.sort(key=lambda x: x['score'], reverse=True)
+            
+            # Take top N*2 for filtering
+            recommendations = scores[:n*2]
+            
+            logger.info(f"Generated {len(recommendations)} initial recommendations")
+        except Exception as e:
+            logger.error(f"Error generating recommendations: {e}")
+            return self._cold_start_recommendations(n)
         
-        logger.info(f"Created {valid_count} valid recommendations out of {len(top_item_indices)} top items")
-        
-        # Add item details to recommendations
-        self._add_item_details_to_recommendations(recommendations)
-        logger.info(f"Added item details to {len(recommendations)} recommendations")
-        
-        # Final filtering to remove any remaining items that might match disliked patterns
+        # Apply final filtering based on disliked keywords
         filtered_recommendations = []
         try:
-            # Initialize disliked_keywords if it doesn't exist
-            if 'disliked_keywords' not in locals():
-                disliked_keywords = []
-                logger.info("No disliked keywords defined, skipping keyword filtering")
-            
-            # Use a scoring approach instead of binary filtering
             for rec in recommendations:
                 item_details = rec.get('item_details', {})
                 name = item_details.get('name', '').lower() if item_details else ''
+                description = item_details.get('description', '').lower() if item_details else ''
                 
-                # Calculate a keyword penalty score
-                keyword_penalty = 0
+                # Check for disliked keywords
                 matching_keywords = []
+                keyword_penalty = 0
                 
-                # Only check keywords if we have them and the name
-                if disliked_keywords and name:
-                    for keyword in disliked_keywords:
-                        # Only consider keywords of sufficient length
-                        if len(keyword) > 3 and keyword in name:
-                            # Longer keywords are more specific and should have higher penalty
-                            penalty = min(0.5, len(keyword) / 20)
-                            keyword_penalty += penalty
-                            matching_keywords.append(keyword)
+                for keyword in disliked_keywords:
+                    if keyword in name or keyword in description:
+                        # Apply a penalty based on keyword length (longer keywords are more specific)
+                        penalty = min(0.5, len(keyword) / 20)
+                        keyword_penalty += penalty
+                        matching_keywords.append(keyword)
                 
                 # Only filter out items with significant keyword penalties
-                if keyword_penalty > 1.0:
+                if keyword_penalty > 0.8:  # Reduced from 1.0 to be more aggressive
                     logger.debug(f"Filtering out item '{name}' with penalty {keyword_penalty} due to keywords: {matching_keywords}")
                     continue
                 
@@ -265,7 +348,7 @@ class HMRecommender:
                 
                 if len(filtered_recommendations) >= n:
                     break
-                    
+                
             logger.info(f"Applied keyword filtering: {len(recommendations) - len(filtered_recommendations)} items filtered out, {len(filtered_recommendations)} remaining")
             
             # If we filtered everything, return the original recommendations
@@ -280,8 +363,58 @@ class HMRecommender:
         # Sort by score (highest first)
         filtered_recommendations.sort(key=lambda x: x['score'], reverse=True)
         
-        logger.info(f"Final recommendations count: {len(filtered_recommendations)}")
-        return filtered_recommendations[:n]
+        # Implement category diversity
+        try:
+            logger.info("Applying category diversity to recommendations")
+            diverse_recommendations = []
+            seen_categories = set()
+            
+            # First pass: get one item from each category
+            for rec in filtered_recommendations:
+                item_details = rec.get('item_details', {})
+                name = item_details.get('name', '').lower() if item_details else ''
+                
+                # Determine the true category based on item name
+                true_category = self._determine_true_category(item_details)
+                
+                if true_category and true_category not in seen_categories:
+                    diverse_recommendations.append(rec)
+                    seen_categories.add(true_category)
+                    logger.debug(f"Added diverse item from category: {true_category}, item: {name}")
+                    
+                    if len(diverse_recommendations) >= n:
+                        break
+            
+            # Second pass: fill remaining slots with highest scored items
+            if len(diverse_recommendations) < n:
+                remaining_slots = n - len(diverse_recommendations)
+                existing_ids = [rec['item_id'] for rec in diverse_recommendations]
+                
+                for rec in filtered_recommendations:
+                    if rec['item_id'] not in existing_ids:
+                        diverse_recommendations.append(rec)
+                        logger.debug(f"Added additional item to fill diversity slots: {rec.get('item_id')}")
+                        
+                        if len(diverse_recommendations) >= n:
+                            break
+            
+            # Sort by score (highest first)
+            diverse_recommendations.sort(key=lambda x: x['score'], reverse=True)
+            
+            logger.info(f"Applied category diversity: {len(filtered_recommendations)} → {len(diverse_recommendations)} recommendations")
+            
+            # If we somehow lost all recommendations, fall back to the filtered ones
+            if not diverse_recommendations and filtered_recommendations:
+                logger.warning("Diversity filtering removed all recommendations! Falling back to original filtered recommendations.")
+                return filtered_recommendations[:n]
+                
+            return diverse_recommendations[:n]
+            
+        except Exception as e:
+            logger.error(f"Error applying category diversity: {e}")
+            # Fall back to filtered recommendations if diversity fails
+            logger.info(f"Final recommendations count (without diversity): {len(filtered_recommendations)}")
+            return filtered_recommendations[:n]
     
     def _cold_start_recommendations(self, n: int = 10) -> List[Dict[str, Any]]:
         """
@@ -371,3 +504,4 @@ class HMRecommender:
             item_id = rec['item_id']
             if item_id in items:
                 rec['item_details'] = items[item_id] 
+    
